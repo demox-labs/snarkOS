@@ -575,11 +575,78 @@ fn load_or_compute_genesis<N: Network>(
 
 #[cfg(test)]
 mod tests {
+    use std::{fs::File, io::BufWriter};
+
     use super::*;
     use crate::commands::{Command, CLI};
+    use metrics::committee;
     use snarkvm::prelude::MainnetV0;
 
     type CurrentNetwork = MainnetV0;
+
+    #[test]
+    fn generate_genesis_block() {
+        // Determine the number of genesis committee members.
+        let num_committee_members = 4;
+
+        // Initialize the (fixed) RNG.
+        let mut rng = ChaChaRng::seed_from_u64(1);
+        // Initialize the development private keys.
+        let development_private_keys = vec!(
+            PrivateKey::<CurrentNetwork>::from_str("APrivateKey1zkpGDvy39WMubzQN4jrsTfLAgUwJRHn1YPreSrM8wfVTeKq").unwrap(),
+            PrivateKey::<CurrentNetwork>::from_str("APrivateKey1zkpFwK6ekkCYBRFVzBis4McVTEdrXibgQkLYu8HnoVqEAKi").unwrap(),
+            PrivateKey::<CurrentNetwork>::from_str("APrivateKey1zkpFhwyWKiynekZ3yY29YKJUhLJoEFmtqyL2zQrnAsEH6Tj").unwrap(),
+            PrivateKey::<CurrentNetwork>::from_str("APrivateKey1zkp7c7QkzTMrNr33smk9xFitzHKzb2wUpLGs8JYqZgKqfy1").unwrap()
+        );
+
+        // Construct the committee.
+        let committee = {
+            // Calculate the committee stake per member.
+            let stake_per_member =
+                CurrentNetwork::STARTING_SUPPLY.saturating_div(2).saturating_div(num_committee_members as u64);
+
+            // Construct the committee members and distribute stakes evenly among committee members.
+            let members = development_private_keys
+                .iter()
+                .map(|private_key| Ok((Address::try_from(private_key)?, (stake_per_member, true))))
+                .collect::<Result<indexmap::IndexMap<_, _>>>().unwrap();
+
+            // Output the committee.
+            Committee::<CurrentNetwork>::new(0u64, members).unwrap()
+        };
+
+        // Calculate the public balance per validator.
+        let remaining_balance = CurrentNetwork::STARTING_SUPPLY.saturating_sub(committee.total_stake());
+        let public_balance_per_validator = remaining_balance.saturating_div(num_committee_members as u64);
+
+        // Construct the public balances with fairly equal distribution.
+        let mut public_balances = development_private_keys
+            .iter()
+            .map(|private_key| Ok((Address::try_from(private_key)?, public_balance_per_validator)))
+            .collect::<Result<indexmap::IndexMap<_, _>>>().unwrap();
+
+        // If there is some leftover balance, add it to the 0-th validator.
+        let leftover =
+            remaining_balance.saturating_sub(public_balance_per_validator * num_committee_members as u64);
+        if leftover > 0 {
+            let (_, balance) = public_balances.get_index_mut(0).unwrap();
+            *balance += leftover;
+        }
+
+        // Check if the sum of committee stakes and public balances equals the total starting supply.
+        let public_balances_sum: u64 = public_balances.values().copied().sum();
+        if committee.total_stake() + public_balances_sum != CurrentNetwork::STARTING_SUPPLY {
+            panic!("Sum of committee stakes and public balances does not equal total starting supply.");
+        }
+
+        // Construct the genesis block.
+        let genesis_block = load_or_compute_genesis(development_private_keys[0], committee, public_balances, &mut rng).unwrap();
+        println!("Genesis block: {:?}", genesis_block);
+
+        let file = File::create("./test-block.genesis").unwrap();
+        let writer = BufWriter::new(file);
+        genesis_block.write_le(writer).unwrap();
+    }
 
     #[test]
     fn test_parse_trusted_peers() {
